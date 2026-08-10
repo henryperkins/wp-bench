@@ -17,9 +17,21 @@ models:
   - name: claude-sonnet-4-20250514
   - name: claude-opus-4-5-20251101
 
+# Stream completions to measure serving telemetry: ttft_ms and
+# output_window_ms land in each record's `usage`, and run metadata gains
+# percentiles plus the sample count behind each. Diagnostic only —
+# telemetry never affects a score. Off by default because streaming changes
+# the provider request path; left off, those fields stay null rather than
+# being approximated from total latency. Every entry above must use the
+# same value, or a multi-model run would compare request paths as well as
+# models (mixed configs are rejected at load time).
+#   - name: gpt-4o
+#     stream: true
+
 # Or use single model (legacy format):
 # model:
 #   name: gpt-4o
+#   # stream: false
 #   # Retry policy for transient provider errors (rate limit, timeout,
 #   # connection, 5xx). Deterministic errors are never retried.
 #   # max_retries: 3

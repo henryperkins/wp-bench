@@ -19,6 +19,7 @@ from wp_bench.core import BenchmarkRunner
 from wp_bench.datasets import ExecutionTest
 from wp_bench.environment import ExecutionResult
 from wp_bench.models import ModelInterface
+from wp_bench.records import _empty_usage
 from wp_bench.scoring import UsageAggregator
 
 
@@ -78,19 +79,18 @@ def test_cost_estimation_failure_does_not_abort(
 def test_usage_dict_shape_matches_canonical_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Asserted against _empty_usage() so the two cannot drift apart.
+
+    Consumers rely on every record carrying the same usage keys whether
+    or not a provider was involved.
+    """
     monkeypatch.setattr(models_module, "completion", lambda **kwargs: _response())
     monkeypatch.setattr(models_module, "completion_cost", lambda response: 0.01)
     model = ModelInterface(ModelConfig(name="gpt-4o-mini"))
 
     usage = model.generate_with_metadata("hello").usage_dict()
 
-    assert set(usage.keys()) == {
-        "prompt_tokens",
-        "completion_tokens",
-        "total_tokens",
-        "cost_usd",
-        "latency_ms",
-    }
+    assert set(usage.keys()) == set(_empty_usage().keys())
 
 
 def test_usage_aggregator_sums_and_percentiles() -> None:

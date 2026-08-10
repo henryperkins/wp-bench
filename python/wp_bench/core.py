@@ -905,6 +905,11 @@ class MultiModelRunner:
                 name: {
                     "config": result["model_config"],
                     "scores": result["scores"],
+                    # The per-model usage rollup the comparison table
+                    # renders. Without it the combined artifact would show
+                    # telemetry on screen and lose it on disk, which defeats
+                    # the point of writing a reproducible artifact.
+                    "usage": result["usage"],
                     "results": result["results"],
                 }
                 for name, result in self.results.items()

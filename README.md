@@ -98,6 +98,67 @@ output:
   jsonl_path: output/results.jsonl
 ```
 
+### Serving telemetry
+
+WP-Bench measures two different things and keeps them apart. **WordPress capability**
+is the benchmark score: did the generated code actually work? **Serving
+characteristics** are diagnostic telemetry: what did the call cost, and what did the
+request look like from the client? Telemetry never enters a score — the primary
+result stays the strict execution pass rate, so a result can never be confounded by
+provider speed, network conditions, or retries.
+
+Every run already records tokens, estimated cost, retries and end-to-end latency.
+End-to-end latency cannot distinguish time spent before the first answer content
+arrives from time spent delivering the answer afterward. Streaming makes those two
+client-observable phases measurable separately:
+
+```yaml
+models:
+  - name: gpt-4o
+    stream: true   # measure TTFT and the output window (diagnostic; no effect on scores)
+```
+
+Each result record then carries, under `usage`:
+
+| Field | Meaning |
+| --- | --- |
+| `latency_ms` | End-to-end wall clock, including retries and backoff waits |
+| `ttft_ms` | Provider call start → first chunk carrying answer content |
+| `output_window_ms` | First content-bearing chunk → last content-bearing chunk |
+
+Run metadata gains `median`/`p95`/`p99` for each, plus `latency_samples`,
+`ttft_samples` and `output_window_samples` — the number of observations behind each
+distribution, so percentiles from a small `--limit` run are not overread.
+
+Details worth knowing:
+
+- **`stream: true` must be uniform across a multi-model run.** Streaming changes the
+  provider request path, so a mixed run would compare request paths as well as
+  models. Mixed configs are rejected at load time.
+- **TTFT tracks `content` only, not reasoning tokens.** The harness grades the
+  content of the completion, so TTFT answers "how long until usable completion
+  content begins arriving?" For a reasoning model that legitimately includes the
+  reasoning phase.
+- **`output_window_ms: 0.0` is a measurement, not a gap** — the whole answer arrived
+  in one chunk. Both fields are `null` when a run doesn't stream, and are never
+  approximated from end-to-end latency.
+- **No tokens/sec.** A client cannot see token boundaries inside a chunk, and
+  provider-reported output counts may include reasoning tokens never emitted as
+  content. Decode throughput needs measurement at the serving backend, not at the
+  request boundary.
+
+**Comparing runs.** Scoring is unchanged (`SCORING_VERSION` 3.0) and `stream`
+defaults to `false`, so default runs remain comparable with previous ones under the
+same scoring, runtime and dataset contract. Streaming changes the provider request
+path, though, so treat streamed runs as their own comparison set: compare them with
+other streamed runs rather than assuming their timings sit alongside historical
+unstreamed ones. Every record carries `model.stream`, so which kind of run produced
+a given number is always recoverable from the results file.
+
+This makes questions like "does the fastest model actually produce usable WordPress
+code?" or "how much latency buys the jump from a 70% to an 85% pass rate?"
+answerable from a single results file.
+
 ### CLI Options
 
 ```bash

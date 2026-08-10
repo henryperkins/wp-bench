@@ -44,6 +44,12 @@ class ModelConfig(StrictModel):
     max_tokens: int | None = None
     top_p: float | None = None
     request_timeout: float = Field(default=300.0, gt=0)
+    #: Stream the completion so the client can observe when answer content
+    #: starts and stops arriving (ttft_ms, output_window_ms). Off by
+    #: default: streaming changes the provider request path, so a run
+    #: streams every call or none of them. Diagnostic only — recorded in
+    #: result records, never scored.
+    stream: bool = False
     #: Additional attempts after the first call fails with a transient
     #: provider error (rate limit, timeout, connection, 5xx).
     max_retries: int = 3
@@ -190,6 +196,31 @@ class HarnessConfig(StrictModel):
     grader: GraderConfig = GraderConfig()
     run: RunConfig = RunConfig()
     output: OutputConfig = OutputConfig()
+
+    @model_validator(mode="after")
+    def _validate_uniform_streaming(self) -> HarnessConfig:
+        """Reject a multi-model run that mixes streamed and unstreamed calls.
+
+        Each entry under ``models:`` is an independent ModelConfig, so
+        nothing else stops one model streaming while another does not.
+        Streaming changes the provider request path, so latency measured
+        under one mode is not comparable with the other — and comparison is
+        the entire point of a multi-model run. Fail loudly rather than
+        emit a table whose latency column silently compares request paths
+        as much as models.
+        """
+        if not self.models or len(self.models) < 2:
+            return self
+        if len({model.stream for model in self.models}) < 2:
+            return self
+        streamed = sorted(model.name for model in self.models if model.stream)
+        unstreamed = sorted(model.name for model in self.models if not model.stream)
+        raise ValueError(
+            "every entry under models: must set the same model.stream value. "
+            "Streaming changes the provider request path, so a mixed run would "
+            "compare request paths as well as models. "
+            f"Streamed: {', '.join(streamed)}; not streamed: {', '.join(unstreamed)}."
+        )
 
     def get_models(self) -> list[ModelConfig]:
         """Return list of models to evaluate."""

@@ -12,9 +12,13 @@ from typing import Any
 from .config import ModelConfig
 
 #: Bump when the per-test record shape changes. Recorded in payload metadata.
+#: 2.1: usage gained serving telemetry (ttft_ms, output_window_ms) and
+#: model info gained "stream". Purely additive — 2.0 consumers keep
+#: working, and the new fields are null unless the run streamed. No score
+#: key changed (see scoring.SCORING_VERSION).
 #: 2.0: the "knowledge" score key and the knowledge-only "output.answer"
 #: field were removed (knowledge track removed).
-RESULT_SCHEMA_VERSION = "2.0"
+RESULT_SCHEMA_VERSION = "2.1"
 
 
 def _model_info(model_config: ModelConfig | None) -> dict[str, Any] | None:
@@ -27,17 +31,32 @@ def _model_info(model_config: ModelConfig | None) -> dict[str, Any] | None:
         "temperature": model_config.temperature,
         "top_p": model_config.top_p,
         "max_tokens": model_config.max_tokens,
+        # Whether the call streamed decides whether this record's serving
+        # telemetry was observable at all, so the provenance travels with
+        # the record rather than living only in run metadata.
+        "stream": model_config.stream,
     }
 
 
 def _empty_usage() -> dict[str, Any]:
-    """Usage placeholders; populated when usage capture is implemented."""
+    """Usage placeholders for records with no model call behind them.
+
+    The key set is the contract: every record carries the same usage keys
+    whether or not a provider was involved, so consumers never branch on
+    presence. ModelGeneration.usage_dict() must produce exactly these keys.
+
+    Serving telemetry (ttft_ms, output_window_ms) stays null unless the run
+    streamed. It describes the request as the client observed it and never
+    contributes to a score.
+    """
     return {
         "prompt_tokens": None,
         "completion_tokens": None,
         "total_tokens": None,
         "cost_usd": None,
         "latency_ms": None,
+        "ttft_ms": None,
+        "output_window_ms": None,
     }
 
 

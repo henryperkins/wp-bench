@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from wp_bench.config import (
     GraderConfig,
     HarnessConfig,
+    ModelConfig,
     OutputConfig,
     RunConfig,
 )
@@ -50,6 +51,39 @@ def test_skip_runtime_alone_is_valid() -> None:
     config = RunConfig(skip_runtime=True)
     assert config.skip_runtime is True
     assert config.skip_static is False
+
+
+def test_mixed_streaming_across_models_rejected() -> None:
+    """A multi-model run must not compare request paths as well as models.
+
+    Each models: entry is an independent ModelConfig, so without this
+    validator one model could stream while another did not, and the
+    latency column would silently compare two different request paths.
+    """
+    with pytest.raises(ValidationError, match="same model.stream value"):
+        HarnessConfig(
+            models=[
+                ModelConfig(name="model-a", stream=True),
+                ModelConfig(name="model-b", stream=False),
+            ]
+        )
+
+
+def test_uniform_streaming_across_models_accepted() -> None:
+    for stream in (True, False):
+        config = HarnessConfig(
+            models=[
+                ModelConfig(name="model-a", stream=stream),
+                ModelConfig(name="model-b", stream=stream),
+            ]
+        )
+        assert all(model.stream is stream for model in config.get_models())
+
+
+def test_single_model_streaming_is_unconstrained() -> None:
+    """The invariant is about comparison, so it cannot apply to one model."""
+    assert HarnessConfig(model=ModelConfig(name="solo", stream=True)).model is not None
+    assert HarnessConfig(models=[ModelConfig(name="solo", stream=True)]).models is not None
 
 
 def test_example_config_loads() -> None:

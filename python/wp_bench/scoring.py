@@ -66,8 +66,25 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
+def _at(values: list[float], fraction: float) -> float | None:
+    """Percentile of a possibly empty sample; None when there is no sample."""
+    return round(_percentile(values, fraction), 1) if values else None
+
+
 class UsageAggregator:
-    """Accumulates per-call usage into a run-level summary."""
+    """Accumulates per-call usage into a run-level summary.
+
+    Serving telemetry is summarized here, alongside cost and tokens, and
+    deliberately nowhere near the score: these numbers describe the
+    provider and the network as much as the model, so they diagnose a
+    result rather than rank it (see SCORING_VERSION).
+
+    Every distribution reports the number of observations behind it. The
+    aggregator sees usage objects, not model configuration or provider
+    attempts, so a sample count is the only honest denominator it can
+    claim — and stating it stops p95/p99 being overread on a small
+    ``--limit`` run.
+    """
 
     def __init__(self) -> None:
         self.prompt_tokens = 0
@@ -76,6 +93,8 @@ class UsageAggregator:
         self.cost_usd = 0.0
         self.has_cost = False
         self.latencies_ms: list[float] = []
+        self.ttfts_ms: list[float] = []
+        self.output_windows_ms: list[float] = []
 
     def add(self, usage: dict[str, Any] | None) -> None:
         if not isinstance(usage, dict):
@@ -88,23 +107,41 @@ class UsageAggregator:
         if isinstance(cost, (int, float)):
             self.cost_usd += float(cost)
             self.has_cost = True
-        latency = usage.get("latency_ms")
-        if isinstance(latency, (int, float)):
-            self.latencies_ms.append(float(latency))
+        for field, samples in (
+            ("latency_ms", self.latencies_ms),
+            ("ttft_ms", self.ttfts_ms),
+            ("output_window_ms", self.output_windows_ms),
+        ):
+            value = usage.get(field)
+            if isinstance(value, (int, float)):
+                samples.append(float(value))
 
     def summary(self) -> dict[str, Any]:
-        """Run-level usage summary; cost is an estimate, not billing truth."""
+        """Run-level usage summary; cost is an estimate, not billing truth.
+
+        Each ``*_samples`` count is exactly the number of recorded
+        observations for the distribution above it — not a request or
+        attempt count, which the aggregator has no way to know (one
+        latency observation can span several provider attempts, and a
+        request that failed outright contributes no usage at all).
+        """
         return {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "estimated_cost_usd": round(self.cost_usd, 6) if self.has_cost else None,
-            "median_latency_ms": (
-                round(_percentile(self.latencies_ms, 0.5), 1) if self.latencies_ms else None
-            ),
-            "p95_latency_ms": (
-                round(_percentile(self.latencies_ms, 0.95), 1) if self.latencies_ms else None
-            ),
+            "median_latency_ms": _at(self.latencies_ms, 0.5),
+            "p95_latency_ms": _at(self.latencies_ms, 0.95),
+            "p99_latency_ms": _at(self.latencies_ms, 0.99),
+            "latency_samples": len(self.latencies_ms),
+            "median_ttft_ms": _at(self.ttfts_ms, 0.5),
+            "p95_ttft_ms": _at(self.ttfts_ms, 0.95),
+            "p99_ttft_ms": _at(self.ttfts_ms, 0.99),
+            "ttft_samples": len(self.ttfts_ms),
+            "median_output_window_ms": _at(self.output_windows_ms, 0.5),
+            "p95_output_window_ms": _at(self.output_windows_ms, 0.95),
+            "p99_output_window_ms": _at(self.output_windows_ms, 0.99),
+            "output_window_samples": len(self.output_windows_ms),
         }
 
 

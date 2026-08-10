@@ -100,6 +100,9 @@ def print_comparison_table(results: dict[str, dict[str, Any]]) -> None:
     table.add_column("Overall", justify="right", style="bold")
     table.add_column("Est. Cost", justify="right")
     table.add_column("Median Latency", justify="right")
+    # Diagnostic serving telemetry, not a ranking column. N/A unless the
+    # run streamed (model.stream), which is what makes TTFT observable.
+    table.add_column("Median TTFT", justify="right")
 
     def _fmt_score(value: float | None) -> str:
         return f"{value*100:.1f}%" if value is not None else "N/A"
@@ -120,6 +123,7 @@ def print_comparison_table(results: dict[str, dict[str, Any]]) -> None:
             f"{scores['overall']*100:.1f}%",
             _fmt_cost(usage.get("estimated_cost_usd")),
             _fmt_latency(usage.get("median_latency_ms")),
+            _fmt_latency(usage.get("median_ttft_ms")),
         )
 
     console.print(table)
