@@ -17,7 +17,11 @@ dependencies = [
   "typer[all]>=0.12",
   "rich>=13.7",
   "pydantic>=2.8",
-  "litellm>=1.37",
+  # 1.41 is the floor the harness actually imports at: litellm.exceptions
+  # gained InternalServerError (used by the retry policy) in 1.41, so the
+  # previously declared >=1.37 could not import wp_bench.models at all.
+  # Verified by running the full suite against 1.41.0.
+  "litellm>=1.41",
   "datasets>=2.19",
   "huggingface_hub>=0.24",
   "docker>=7.1",
