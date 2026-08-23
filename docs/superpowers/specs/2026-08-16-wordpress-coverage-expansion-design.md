@@ -1,10 +1,12 @@
 # WP-Bench WordPress Coverage Expansion Design
 
-- Status: Draft for user review
-- Date: 2026-08-16
+- Status: Approved
+- Date: 2026-08-16; revised 2026-08-22
 - Workstream: 3 of 3
 - Depends on: benchmark-integrity schema, provenance, and selection contracts
 - Benefits from: reporting dimension and completeness support
+- Contract independence: canonical suite, artifact, and runtime capabilities
+  do not depend on a transient runner model, legacy result shape, or PR order
 
 ## Decision summary
 
@@ -22,10 +24,14 @@ format for every runtime. Delivery is split into small capability and dataset
 milestones so each new runtime surface is proven by canaries before broad task
 authoring.
 
-## Context and current census
+## Baseline census (non-normative)
 
-The current corpus measures isolated PHP implementation much more than
-realistic WordPress delivery:
+The observations in this section are frozen to evidence commit
+`77c98d61b73c6341db2fa5ccb15212867b825eb5` (abbreviated `77c98d6` below).
+They motivate the expansion but are not delivery contracts; the versioned
+suite and adapter rules below remain authoritative if producer code changes.
+At that baseline, the corpus measures isolated PHP implementation much more
+than realistic WordPress delivery:
 
 - `wp-core-v1` contains 185 execution tests across 29 category files.
 - All 185 omit `artifact_kind` and therefore load as `php_snippet`.
@@ -50,7 +56,7 @@ There is a partial multi-file plugin path:
 - `runtime/src/class-verifier.php` asserts against the loaded plugin and
   removes the directory.
 
-That path is not yet an end-to-end dataset capability. Current Python tests
+That baseline path is not yet an end-to-end dataset capability. Its Python tests
 fake `execute_artifact()`, the dataset validator assumes every task has an
 inline PHP reference, static analysis loses file identity, and the runtime
 does not exercise actual plugin lifecycle or a fresh WordPress bootstrap.
@@ -93,7 +99,7 @@ The configured `ArtifactKind` union advertises `block_plugin`, `js_module`,
 
 ## Alternatives considered
 
-### Add only plugin-file tasks with the current runner
+### Add only plugin-file tasks with the evidence-baseline runner
 
 This yields a quick multi-file increment but cannot honestly cover lifecycle,
 themes, editor JavaScript, or multisite. It is useful as the first milestone,
@@ -145,13 +151,32 @@ and the suite ID; both must match `suite.json`. Existing documents without a
 schema version load as schema 1.0. The document's existing `version` field
 continues to mean content revision, not schema version.
 
+The suite manifest and normalized schema-2 rows are the canonical descriptor
+source regardless of which fields a transient `ExecutionTest` model or legacy
+result writer exposes. Each source adapter must produce the declared value,
+emit null only where the canonical contract permits it, or reject the source
+as not representable. Removing `difficulty`, artifact metadata, or selection
+fields from a legacy producer cannot remove them from this suite contract.
+
 The local loader and Hugging Face export preserve the suite manifest identity.
-Every exported row carries `suite_id`, `suite_content_version`,
+Every exported row carries the canonical compatibility field `suite` plus
+`suite_id`, and those two values must be equal. It also carries
+`suite_content_version`,
 `execution_schema_version`, `suite_manifest_sha256`, and canonical
 `suite_manifest_json`. All rows for one suite must agree; the Hub loader
 reconstructs and verifies the manifest before loading tests. This makes local
-and Hub benchmark fingerprints identical without relying on mutable external
-metadata.
+and Hub catalog inputs identical without relying on mutable external metadata;
+with identical remaining provenance/runtime identities, WS1.3 then produces
+identical benchmark contract fingerprints.
+
+The schema-2 validator maps that versioned raw envelope through the benchmark
+integrity design's exact injected `SuitePolicyResolver(*, suite_id,
+suite_manifest_json, suite_manifest_sha256)` callable to a
+`SuiteDescriptorPolicy`. WS1.1 consumes that policy and never reaches into raw
+manifest keys. The raw manifest schema
+therefore remains WS3.0-owned without becoming a merge-order dependency: a
+present manifest unsupported by the available validator fails closed, while an
+absent manifest uses WS1.1's schema-1 built-in policy.
 `wp-core-v1` remains schema 1 and accepts its historical labels. Schema-2
 tasks use only `basic`, `intermediate`, and `hard`; the five existing
 `advanced` records are not mutated.
@@ -265,8 +290,8 @@ Maintainer negative controls live in
 ```json
 {
   "test_id": "e-plugin-lifecycle-001",
-  "benchmark_definition_sha256": "sha256:example-definition-digest",
-  "verification_sha256": "sha256:example-verification-digest",
+  "benchmark_definition_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "verification_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
   "controls": [
     {
       "id": "missing-cleanup",
@@ -338,7 +363,7 @@ defined by workstream 1.
 
 ### PHP snippet
 
-Keep the current fenced-PHP response and
+Keep the schema-1 fenced-PHP response and
 `setup → candidate → assertions → teardown` semantics.
 
 ### Plugin file bundle
@@ -427,11 +452,12 @@ phases.
 
 ## Runtime lifecycle
 
-Every candidate receives a unique `wp-bench-candidate-<token>` directory.
-Only the exact owned directory and explicitly tracked fixtures may be removed.
-The Python harness performs cleanup in `finally` in addition to PHP cleanup,
-because a timeout or killed PHP process can bypass destructors and shutdown
-hooks.
+Each installation/session directory is unique and scoped to
+`(run_id, unit_id, test_id, attempt_ordinal)`. Only that exact owned directory
+and explicitly tracked fixtures may be removed. A recovered attempt installs
+the same frozen normalized artifact into a fresh owned session. The Python
+harness performs cleanup in `finally` in addition to PHP cleanup, because a
+timeout or killed PHP process can bypass destructors and shutdown hooks.
 
 File-artifact execution is:
 
@@ -446,17 +472,27 @@ File-artifact execution is:
    verify cleanup.
 9. Record phase results, durations, bootstrap identity, and cleanup outcome.
 
+These steps describe one canonical attempt. On a recoverable `runtime_reset`
+or `grading` error, workstream 1 starts a new attempt at step 1
+(`runtime_reset`) and replays the complete runtime sequence using the already
+captured normalized artifact; it never grades a retry against residual state,
+regenerates, or reparses a model completion. `artifact_cleanup`,
+runtime-identity drift, and verification-contract drift are terminal and halt
+or quarantine the profile as defined by the canonical integrity contract.
+
 Fresh bootstraps are mandatory after activation and deactivation. Including a
 main plugin file in one PHP process does not prove activation hooks,
 subsequent-request loading, deactivation, or uninstall behavior.
 
-`Artifact_Installer` therefore becomes an install/session primitive; it no
-longer conflates copying files with activating or directly including them for
-new lifecycle plans. Existing `plugin_load_legacy` preserves compatibility
-until the current plugin path migrates.
+The active installation/session component therefore separates scoped file
+placement and ownership from activation or direct inclusion for every new
+lifecycle plan. `plugin_load_legacy` remains an explicit schema-1 compatibility
+capability and is removed only through a versioned migration, not implicitly
+when implementation symbols or runner internals change.
 
-`grader.timeout_seconds` is the deadline for the entire task across all phases,
-not a fresh allowance per phase.
+`grader.timeout_seconds` is the deadline for all phases of one attempt, not a
+fresh allowance per phase and not a shared allowance across recovered
+attempts.
 
 If assertions finish but cleanup fails, the canonical outcome becomes
 `errored` at `artifact_cleanup`; the pre-cleanup score remains diagnostic and
@@ -470,6 +506,11 @@ Add a profile-aware environment manager. Single-site and multisite runtimes
 are isolated instances with pinned equivalent WordPress, PHP, runtime-plugin,
 database, and WP-CLI versions. Per-test reset applies inside the selected
 profile.
+
+Every profile records and validates workstream 1's structured isolation
+identity: `mechanism`, `scope`, `worker_topology`, and `identity_sha256`.
+Behavior observed at preflight is authoritative; a flat configuration value or
+branch-specific metadata shape is not.
 
 Configuration adds a typed `grader.profiles` map whose keys are runtime-profile
 names. Each `GraderProfileConfig` supplies its own grader kind, wp-env path or
@@ -497,15 +538,16 @@ The multisite profile:
 - supports site and network activation;
 - verifies behavior against at least two sites for network-scoped tasks;
 - records the network/site IDs used in grader diagnostics;
-- remains serial under `reset_per_test`.
+- remains serial under its official profile isolation policy.
 
 `metadata.requires_multisite` becomes a validated mirror of
 `execution.profile`, not an informational flag. Profile disagreement fails
 dataset validation.
 
-The root `.wp-env.json` and `runtime/.wp-env.json` currently target different
-WordPress/PHP combinations. Official project-suite runs use explicit runtime
-profiles under `runtime/` and record observed identities through workstream 1.
+At `77c98d6`, the root `.wp-env.json` and `runtime/.wp-env.json` target
+different WordPress/PHP combinations. Official project-suite runs use explicit
+runtime profiles and record observed identities through workstream 1; no
+ambient workspace default is authoritative.
 
 ## Browser/editor engine
 
@@ -578,8 +620,10 @@ plan name, checker-only helper, or incidental exact API key unless that API
 surface is itself the task.
 
 `--check-exploits` is generalized into artifact-aware negative-control
-execution. It must no longer hardcode `Artifact(kind="php_snippet")`.
-Unauditable is a release failure for every new task.
+execution. It consumes the sidecar's declared artifact kind through the
+canonical normalized-artifact adapter and never assumes a PHP-source artifact
+from a legacy producer shape. Unauditable is a release failure for every new
+task.
 
 Schema-1 string source references remain readable but do not satisfy the
 schema-2 review gate. Schema-2 refs reject branch names, mutable `trunk`, and
@@ -592,6 +636,14 @@ observed rejection against that expectation rather than accepting any crash.
 Each milestone introduces at most one runtime capability and no more than
 eight tasks. Every capability milestone ends with real-runtime canaries before
 the corresponding dataset-only expansion.
+
+WS3.0 validator/schema code may merge as a dormant capability in either order
+with WS1.1. A manifest-bearing suite, its runnable example config, or its
+export/import path must not activate until the WS1.1-owned
+`SuiteDescriptorPolicy`, `SuitePolicyResolver`, and suite-scoped `load_suite()`
+capability tests are present and green, or the activating change bundles those
+exact capabilities. It must never duplicate the policy type or let a legacy
+loader silently ignore `suite.json`.
 
 1. **WS3.0 — Suite schema and gates:** add `suite.json`, a tracked
    `wp-projects.yaml` example config, schema-2 validation, conditional reference
@@ -672,6 +724,10 @@ tests but do not satisfy a capability milestone.
 - Cleanup fault injection covers assertion failure, PHP fatal, timeout,
   browser crash, and harness interruption. The next test must see no owned
   candidate directory or persistent fixture.
+- Recovery fault injection introduces one recoverable reset or grading error
+  and proves the next attempt uses the same artifact digest and generation
+  provenance with no additional provider call. A cleanup failure is terminal,
+  quarantines the profile, and is never retried as a new candidate.
 - Reference tests run every new artifact through its declared profile and
   engines.
 - Negative-control tests prove every typed known-wrong artifact fails for the
@@ -719,11 +775,15 @@ tests but do not satisfy a capability milestone.
 - Artifact size limits intentionally constrain tasks to focused project slices,
   not full products.
 - Official browser checks require a web-served WordPress runtime in addition to
-  the current CLI verifier path.
-- The existing plugin-files path has not yet been proven through a real runtime
-  integration test; WS3.1 is a prerequisite, not assumed capability.
+  a CLI verifier capability.
+- The plugin-files path at `77c98d6` has not been proven through a real runtime
+  integration test; WS3.1 must establish the capability with canaries rather
+  than inherit it from ambient code state.
 
-## Repository evidence
+## Baseline evidence locations at `77c98d6`
+
+The symbols below locate non-normative observations and may move without
+changing the canonical suite contract.
 
 - `python/wp_bench/config.py::ArtifactKind`
 - `python/wp_bench/artifacts.py::parse_artifact`

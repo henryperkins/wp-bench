@@ -1,9 +1,11 @@
 # WP-Bench Reporting and Repeated-Trial Statistics Design
 
-- Status: Draft for user review
-- Date: 2026-08-16
+- Status: Approved
+- Date: 2026-08-16; revised 2026-08-22
 - Workstream: 2 of 3
 - Depends on: `2026-08-16-benchmark-integrity-design.md`
+- Contract independence: reporting consumes canonical capabilities and reader
+  relations, never branch state or a particular legacy producer shape
 
 ## Decision summary
 
@@ -19,8 +21,10 @@ paired skills effects without pooling incompatible or incomplete runs.
 
 ## Context and problem
 
-`notebooks/results_report.ipynb` predates the current result and scoring
-contracts:
+At immutable evidence baseline
+`77c98d61b73c6341db2fa5ccb15212867b825eb5`,
+`notebooks/results_report.ipynb` predates the
+canonical result and scoring contracts:
 
 - It unconditionally reads `data["models"]`, while normal single-model,
   reference, and exploit-audit outputs use different top-level shapes.
@@ -37,9 +41,9 @@ contracts:
 - Its exported HTML loads mutable `plotly-latest` from a CDN and omits the run
   provenance needed to audit the report.
 
-The runner also performs one model generation per selected task. A selection
-seed controls task choice, not model generation, so present artifacts cannot
-quantify run-to-run stochasticity.
+The evidence-baseline runner performs one model generation per selected task.
+Any seed sealed by a selection algorithm controls task choice, not model
+generation, so those artifacts cannot quantify run-to-run stochasticity.
 
 ## Goals
 
@@ -94,11 +98,14 @@ deferred.
 
 ## Dependency contract with workstream 1
 
-Reporting consumes only `load_result_envelope(path)` and canonical schema
-objects. Workstream 1 owns:
+Reporting opens input sets only through the canonical reader APIs:
+`load_result_envelopes(paths)` and its single-input wrapper
+`load_result_envelope(path)`. Workstream 1 owns:
 
-- `RunManifest`, `ResultRecord`, `ResultEnvelope`, and JSONL recovery.
+- `RunManifest`, `ResultRecord`, and `ResultEnvelope`.
 - Legacy payload detection and `LegacyResultAdapter`.
+- JSON/JSONL recovery, sibling precedence, deduplication, and declared
+  external-unit resolution.
 - Selected-test descriptors and definition hashes.
 - Per-unit counts, metric denominators, completeness, and eligibility.
 - `contract_fingerprint_sha256`,
@@ -107,8 +114,8 @@ objects. Workstream 1 owns:
 - Stable warnings for facts that legacy artifacts cannot prove.
 
 Reporting must not import `json` or `orjson` to inspect an input shape, reopen
-the live dataset to invent denominators, or use `len(records)` as a score
-denominator.
+the live dataset to invent denominators, infer cross-artifact pairs, or use
+`len(records)` as a score denominator.
 
 ## Architecture
 
@@ -116,8 +123,8 @@ Add `python/wp_bench/reporting/`:
 
 | Module | Responsibility |
 |---|---|
-| `api.py` | Public `build_report(envelopes, options) -> ReportDocument`. |
-| `cohorts.py` | Deduplicate inputs, form compatibility cohorts, group subjects/trials, and emit warnings. |
+| `api.py` | Public `build_report(load_result: LoadResult, options: ReportOptions) -> ReportDocument`, consuming the canonical reader's multi-input result. |
+| `cohorts.py` | Consume reader relation results, form compatibility cohorts, group subjects/trials, and emit warnings. |
 | `metrics.py` | Project canonical metrics into scorecards and dimension breakdowns without changing denominators. |
 | `statistics.py` | Wilson intervals, repeated-trial summaries, paired skills effects, and deterministic resampling. |
 | `models.py` | Versioned renderer-neutral report dataclasses. |
@@ -144,13 +151,16 @@ multiplier and the pre-run plan separately prints:
 ```text
 planned generations = selected tests × models × variants × trials
 maximum provider calls = planned generations × (max_retries + 1)
-planned grader executions = planned generations
+initial planned grader executions = planned generations
+maximum grader attempts = initial planned grader executions × (max_test_reattempts + 1)
 ```
 
 The maximum is reported per retry policy when configured models differ.
-Reference mode reports zero model/provider calls and one planned grader
-execution per selected test. Audit mode reports zero model/provider calls and
-the exact required candidate-execution count from maintainer QA data.
+Reference mode reports zero model/provider calls, one initial planned grader
+execution per selected test, and its recovery-aware maximum. Audit mode
+reports zero model/provider calls and the exact required candidate-execution
+count from maintainer QA data; its forced `max_test_reattempts=0` makes initial
+and maximum grader attempts equal.
 
 Rules:
 
@@ -159,13 +169,16 @@ Rules:
    grading contract.
 3. Each trial is a distinct manifest run unit with one-based `trial_index` and
    unique `unit_id`.
-4. `run.seed` remains the selection seed and is never described as a model
-   generation seed.
+4. The sealed manifest records requested and effective selection parameters.
+   Any seed or nonce used by the selected algorithm governs selection only and
+   is never represented as a model-generation seed. A producer that does not
+   support a requested selector rejects it before sealing the manifest.
 5. WP-Bench does not silently synthesize provider seeds. If a future model
    configuration sends a provider seed, the requested and effective values are
    recorded per attempt and become part of the subject identity.
-6. Isolation resets apply between every task in every trial exactly as they do
-   for a one-trial run.
+6. The selected runtime profile's sealed structured isolation identity and
+   recovery policy apply to every attempt in every trial exactly as they do for
+   a one-trial run.
 7. Baseline and skills variants with the same actor and `trial_index` form the
    intended A/B pair only when the manifest assigns the same non-null `pair_id`.
 8. Trial failures are recorded independently; one incomplete unit does not
@@ -186,9 +199,12 @@ grouping requires an identical resolved subject fingerprint; the report can
 therefore combine compatible in-run and cross-run trials. If only planned
 identity is available, diagnostic grouping is allowed with
 `PROVENANCE_UNKNOWN`, but the series is unranked.
-Automatic skills pairing never crosses run IDs. Cross-run A/B pairing is
-deferred until a future explicit pairing-map contract exists; matching actor,
-trial index, and test ID is insufficient.
+Every automatic pair has exactly one sealed owning manifest; ownership is
+never inferred jointly from two manifests. The owner may explicitly resolve a
+sourced arm whose original `run_id` differs through its declared external-unit
+reference. Coincidental cross-input matching never creates a pair. Any other
+form of cross-run A/B pairing is deferred; matching actor, trial index, and
+test ID is insufficient.
 
 No automatic maximum is imposed because CI and publication profiles may vary,
 but documentation defines:
@@ -263,12 +279,13 @@ Eligible repeated trials require the same
 identity may use the same `planned_subject_fingerprint_sha256`, with a visible
 provenance warning and no leaderboard styling. Rules:
 
-- Inputs are deduplicated by the reader's normalized
-  `semantic_envelope_sha256`, not raw file bytes. Equivalent final JSON and
-  JSONL siblings collapse to one envelope, and a finalized envelope supersedes
-  an equivalent strict-prefix partial.
-- The same `run_id` with non-equivalent normalized-envelope content is a fatal
-  integrity error.
+- Reporting consumes the reader's relation result and never deduplicates raw
+  inputs itself. The reader collapses equivalent canonical siblings and
+  applies finalized/partial precedence. Legacy inputs remain distinct when no
+  semantic relation can be proved and surface `legacy_possible_double_count`.
+- The reader reports the same `run_id` with non-equivalent normalized-envelope
+  content as an integrity failure; reporting lists that failure and continues
+  with surviving inputs.
 - Different contract fingerprints create separate cohorts and are never
   pooled or ranked together.
 - Different subject fingerprints may be compared within a compatible cohort,
@@ -288,10 +305,10 @@ provenance warning and no leaderboard styling. Rules:
 |---|---|---|
 | Single model | Scorecard, provenance, completeness, breakdowns, usage | Ranked only with compatible eligible subjects. |
 | Multi-model | Comparison table and interval chart, then subject details | Cohorted by contract; no cross-cohort rank. |
-| Baseline + skills | Normal series plus paired skill-impact section | Pair by run ID, manifest pair ID, actor, trial index, and test ID. |
+| Baseline + skills | Normal series plus paired skill-impact section | Use the owning manifest's pair map; resolve sourced arms only through declared refs. |
 | Skills-only | Treatment scorecard and skill provenance | No synthetic baseline; explicit warning. |
 | Reference solution | Reference coverage and exact failures | Validation only; target is complete 100% strict pass. |
-| Exploit audit | Audit coverage, exploitable and unauditable tests | No model score; exploit denominator is auditable tests. |
+| Exploit audit | Audit coverage, exploitable and unauditable tests | No model score; exploit denominator is canonical `audited_tests`. |
 | Completed but ineligible | Full diagnostics and reasons | No rank or winner language. |
 | Completed with errors | Per-unit completeness and failures; complete sibling units remain visible | Score-incomplete units and the repeated series are unranked. |
 | Failed/aborted/partial | Status, observed progress, errors, and known missing work | No suite score or repeated estimate. |
@@ -310,8 +327,11 @@ semantics.
 
 - Strict execution pass rate is primary and always displays
   `passed / graded` with the label “conditional on graded attempts.”
-- Selected execution success rate displays `passed / planned` as an
-  operational completeness/reliability diagnostic.
+- Selected execution success rate projects the canonical
+  `passed / (planned - diagnostic)` metric unchanged, including
+  `denominator_kind: gradable_planned`, as an operational
+  completeness/reliability diagnostic. The diagnostic count is displayed
+  beside it.
 - Runtime partial mean displays its non-null applicable count.
 - Static-policy pass rate displays its applicable count.
 - `overall` is identified as an alias and is never plotted independently.
@@ -392,9 +412,16 @@ never replaces strict pass rate.
 
 ### Paired skills comparison
 
-A valid automatic pair shares `run_id`, non-null manifest `pair_id`, contract,
-actor, `trial_index`, and `test_id`, and has score-bearing baseline and skills
-outcomes. For `n_graded_pairs`:
+A valid automatic pair is defined solely by one owning sealed manifest's
+non-null `pair_id` and its mapping to exactly two compatible unit IDs. An
+executed arm is read from that manifest's envelope; a sourced arm is resolved
+only after canonical sibling deduplication through its declared
+external-unit reference, matching `source_run_id`, `source_unit_id`,
+`source_semantic_envelope_sha256`, and contract fingerprint exactly. It retains
+its original `run_id`. Actor, `trial_index`, and `test_id` must agree after
+that declared join, but matching values never create a pair by themselves.
+Sourced pairs are diagnostic and unranked because `unit_sourced_externally`
+makes the owning run ineligible. For `n_graded_pairs`:
 
 - `a`: both pass;
 - `b`: baseline passes, skills fails (`broken`);
@@ -437,7 +464,10 @@ audited-safe/exploitable/not-auditable/audit-error test counts, and
 required/completed/error candidate counts. It includes a candidate table with
 candidate ID, kind, attempted/completed state, outcome, stage, reason, and
 assertion IDs. Zero-candidate and candidate-error tests never count as safe or
-enter the exploit-rate denominator.
+enter the exploit-rate denominator. `audited_tests` means tests with
+`audit_complete`, exactly `exploitable + audited_safe`; reporting projects that
+canonical denominator without substituting tests that merely had applicable
+candidates.
 
 ## CLI, notebook, and HTML
 
@@ -458,6 +488,9 @@ are listed before report generation.
 Options are limited to `--confidence`, `--bootstrap-samples`, `--seed`, and
 `--strict-compatible`. By default, incompatible inputs form separate warned
 cohorts. Strict mode exits nonzero instead.
+
+The report `--seed` controls statistical resampling only. It is unrelated to
+run selection parameters or provider generation parameters.
 
 `--confidence` defaults to `0.95` and accepts `0.5 <= C < 1.0`; Wilson,
 Student-t, and bootstrap quantiles all derive from the same effective value.
@@ -481,7 +514,8 @@ HTML ordering:
 8. Error and missing-work details.
 9. Methods and legacy-compatibility appendix.
 
-The current radar is removed because it double-counts the primary metric.
+The evidence-baseline radar is removed because it double-counts the primary
+metric.
 Use dot-and-whisker charts and accessible data tables. HTML has inline CSS and
 a pinned inline plotting bundle, stable element IDs, escaped labels, and no
 network requests. Default output omits wall-clock report generation time and
@@ -496,7 +530,7 @@ versions, output bytes must be identical.
 ## Failure behavior
 
 - Unsupported future schema major, invalid canonical envelope, conflicting
-  run ID, or one invalid input is fatal.
+  run ID, or one invalid input is fatal at that input or run-ID-group scope.
 - Contract mismatches split cohorts and explain why comparison changed.
 - Unknown legacy provenance or completeness disables eligibility.
 - Missing dimension metadata enters `unknown` and emits a warning.
@@ -507,6 +541,10 @@ versions, output bytes must be identical.
 - Reference and exploit modes are never compared with model scores.
 - Raw model and exploit payloads stay in source artifacts, not default reports.
 
+"Fatal" means the affected input or group is excluded and named with its
+stable failure code; surviving inputs still render, and the command exits
+nonzero.
+
 ## Test strategy
 
 - Unit-test denominator projection for pass, fail, error, diagnostic, missing,
@@ -515,19 +553,23 @@ versions, output bytes must be identical.
   contingency-table examples.
 - Test compatibility keys, duplicate detection, cohort splitting, subject
   grouping, unbalanced trials, and label disambiguation.
-- Test JSON/JSONL semantic sibling deduplication, finalized-over-partial
-  preference, and conflicting same-run rejection.
-- Test that separate baseline-only and skills-only runs sharing actor and
-  `trial_index=1` do not pair; only same-run matching `pair_id` pairs.
+- Keep raw JSON/JSONL sibling equivalence, finalized-over-partial preference,
+  and conflicting same-run rejection in reader tests. Reporting tests consume
+  a pre-related `LoadResult` and verify its chosen representative, collapsed
+  path provenance, failures, rendered exclusions, and aggregate nonzero exit.
+- Test that unrelated baseline-only and skills-only inputs sharing actor,
+  trial index, and test IDs do not pair; only an owning manifest's pair map can
+  pair executed units or resolve a sourced unit through its declared external
+  reference.
 - Test `record_complete=true`/`score_complete=false` exclusion while a complete
   sibling unit remains usable.
 - Test separate graded/runtime/cost/latency pair denominators, including
   billable errored attempts.
 - Test every dimension bucket and exact reconciliation to parent counts.
 - Add canonical fixtures for every mode and terminal status in the mode table.
-- Use current v2.1 single, multi, skills, reference, audit, and record-only
-  shapes as legacy-reader golden fixtures; reporting receives only adapted
-  envelopes.
+- Use every entry in workstream 1's additive legacy fixture index; reporting
+  receives only adapted envelopes and never branches on legacy version,
+  difficulty, telemetry, or producer-specific fields.
 - Test record-order invariance and deterministic resampling.
 - Snapshot `ReportDocument` before snapshotting HTML.
 - Assert two renders are byte-identical, labels are escaped, raw code is absent,
@@ -540,22 +582,25 @@ versions, output bytes must be identical.
 
 ## Rollout
 
-1. Land the workstream 1 envelope, selected catalog, fingerprints,
-   completeness, and legacy reader.
+1. Activate reporting only when the workstream 1 envelope, selected catalog,
+   fingerprints, completeness, and legacy-reader capabilities are available;
+   a reporting change that arrives first remains dormant or includes them.
 2. Add `run.trials`, manifest unit expansion, planned-call display, and trial
    identity tests.
 3. Add report models, cohorting, primary metrics, dimension breakdowns, and
    statistical fixtures.
 4. Add deterministic standalone HTML and the CLI command.
 5. Replace the notebook with the thin API client.
-6. Add legacy golden fixtures and compatibility warnings.
+6. Add reporting projections and compatibility warnings for every indexed
+   workstream 1 legacy fixture.
 7. Update README metric, trial, reporting, and installation documentation.
 8. Validate one real artifact for every mode/status and a five-trial mocked or
    low-cost model matrix before release.
 
 ## Acceptance criteria
 
-1. Reporting opens inputs exclusively through `load_result_envelope()`.
+1. Reporting opens inputs exclusively through canonical reader APIs, using
+   `load_result_envelopes()` whenever relations between inputs are possible.
 2. Every mode/status in the matrix produces a faithful standalone report.
 3. Strict execution pass rate is primary; correctness and overall cannot
    distort ranking or visual emphasis.
@@ -563,12 +608,14 @@ versions, output bytes must be identical.
    completeness, and eligibility.
 5. All dimension rows, including `unknown`, reconcile to parent counts.
 6. Benchmark `run.trials` creates distinct units over one frozen selection and
-   records planned generations, retry-aware provider-call ceiling, and grader
-   executions before execution; validation/audit reject multiple trials.
+   records planned generations, retry-aware provider-call ceiling, initial
+   grader executions, and recovery-aware maximum grader attempts before
+   execution; validation/audit reject multiple trials.
 7. Compatible score-complete trials show individual values, mean, dispersion,
    and a named interval; score-incomplete trials are excluded visibly.
 8. Incompatible inputs are separated and never pooled.
-9. Skills reports require same-run manifest pair IDs and include paired counts,
+9. Skills reports require an owning manifest pair map; sourced arms resolve
+   only through declared external references. Reports include paired counts,
    net effect, uncertainty, fixed/broken tests, field-specific resource
    denominators, and excluded-pair counts.
 10. Skills-only inputs never manufacture a baseline comparison.
@@ -576,7 +623,8 @@ versions, output bytes must be identical.
     leaderboard styling.
 12. Reference reports identify every failure/error/missing test.
 13. Exploit reports expose test and candidate coverage, distinguish audit
-    errors from rejected candidates, and use fully audited tests as the exploit
+    errors from rejected candidates, and use canonical `audited_tests`—tests
+    with `audit_complete`, exactly `exploitable + audited_safe`—as the exploit
     denominator.
 14. CLI and notebook produce the same report model.
 15. HTML is offline, escaped, deterministic, and omits raw code by default.
